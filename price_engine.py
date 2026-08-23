@@ -13,9 +13,10 @@ from firebase_admin import credentials, firestore
 # A101 + ŞOK
 # ============================================================
 
-print("=" * 60)
+print("=" * 70)
 print("UCUZA OTOMATİK FİYAT MOTORU")
-print("=" * 60)
+print("A101 + ŞOK")
+print("=" * 70)
 
 
 # ============================================================
@@ -25,9 +26,13 @@ print("=" * 60)
 service_account = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
 if not service_account:
-    raise RuntimeError("FIREBASE_SERVICE_ACCOUNT bulunamadı.")
+    raise RuntimeError(
+        "FIREBASE_SERVICE_ACCOUNT bulunamadı."
+    )
 
-cred = credentials.Certificate(json.loads(service_account))
+cred = credentials.Certificate(
+    json.loads(service_account)
+)
 
 if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
@@ -36,7 +41,7 @@ db = firestore.client()
 
 
 # ============================================================
-# HTTP SESSION
+# HTTP
 # ============================================================
 
 HEADERS = {
@@ -44,18 +49,14 @@ HEADERS = {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 "
         "(KHTML, like Gecko) "
-        "Chrome/139.0.0.0 Safari/537.36"
+        "Chrome/139.0 Safari/537.36"
     ),
+    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
     "Accept": (
         "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,image/avif,image/webp,"
-        "*/*;q=0.8"
+        "application/xml;q=0.9,*/*;q=0.8"
     ),
-    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
     "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Upgrade-Insecure-Requests": "1",
-    "Referer": "https://www.a101.com.tr/",
 }
 
 session = requests.Session()
@@ -85,10 +86,39 @@ def normalize(text):
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    text = re.sub(r"[^a-z0-9 ]", " ", text)
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"[^a-z0-9 ]",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
 
     return text.strip()
+
+
+def clean_name(name):
+
+    if not name:
+        return ""
+
+    name = re.sub(
+        r"<[^>]+>",
+        " ",
+        str(name)
+    )
+
+    name = re.sub(
+        r"\s+",
+        " ",
+        name
+    )
+
+    return name.strip()
 
 
 def parse_price(value):
@@ -101,14 +131,28 @@ def parse_price(value):
     value = value.replace("₺", "")
     value = value.replace("TL", "")
     value = value.replace("tl", "")
+    value = value.replace("TRY", "")
+
     value = value.strip()
 
-    # 2.299,00
+    # 1.299,90
     if "," in value:
-        value = value.replace(".", "")
-        value = value.replace(",", ".")
 
-    value = re.sub(r"[^0-9.]", "", value)
+        value = value.replace(
+            ".",
+            ""
+        )
+
+        value = value.replace(
+            ",",
+            "."
+        )
+
+    value = re.sub(
+        r"[^0-9.]",
+        "",
+        value
+    )
 
     try:
 
@@ -124,18 +168,27 @@ def parse_price(value):
         return None
 
 
-def clean_name(name):
+def make_product_id(
+    name,
+    barcode=""
+):
 
-    if not name:
-        return ""
+    if barcode:
+        return str(barcode)
 
-    name = re.sub(r"\s+", " ", str(name))
+    normalized = normalize(name)
 
-    return name.strip()
+    if not normalized:
+        return None
+
+    return normalized.replace(
+        " ",
+        "-"
+    )
 
 
 # ============================================================
-# FIRESTORE ÜRÜN KAYDET
+# FIRESTORE PRODUCT
 # ============================================================
 
 def save_product(
@@ -151,21 +204,22 @@ def save_product(
     if not name:
         return None
 
-    # Barkod yoksa ürün adından stabil ID
-    if not barcode:
+    product_id = make_product_id(
+        name,
+        barcode
+    )
 
-        barcode = normalize(name).replace(
-            " ",
-            "-"
-        )
+    if not product_id:
+        return None
 
     ref = (
-        db.collection("products")
-        .document(str(barcode))
+        db
+        .collection("products")
+        .document(product_id)
     )
 
     data = {
-        "barcode": str(barcode),
+        "barcode": str(product_id),
         "name": name,
         "brand": clean_name(brand),
         "quantity": clean_name(quantity),
@@ -179,7 +233,7 @@ def save_product(
     )
 
     return {
-        "barcode": str(barcode),
+        "barcode": str(product_id),
         "name": name,
         "brand": clean_name(brand),
         "quantity": clean_name(quantity),
@@ -187,7 +241,7 @@ def save_product(
 
 
 # ============================================================
-# FIRESTORE FİYAT KAYDET
+# FIRESTORE PRICE
 # ============================================================
 
 def save_price(
@@ -205,7 +259,8 @@ def save_price(
     barcode = product["barcode"]
 
     ref = (
-        db.collection("prices")
+        db
+        .collection("prices")
         .document(str(barcode))
         .collection("stores")
         .document(store)
@@ -215,15 +270,21 @@ def save_price(
         {
             "barcode": str(barcode),
             "productName": product["name"],
-            "brand": product.get("brand", ""),
-            "quantity": product.get("quantity", ""),
+            "brand": product.get(
+                "brand",
+                ""
+            ),
+            "quantity": product.get(
+                "quantity",
+                ""
+            ),
             "store": store,
             "price": price,
             "currency": "TRY",
             "url": url,
             "updatedAt": firestore.SERVER_TIMESTAMP,
         },
-        merge=True,
+        merge=True
     )
 
     print(
@@ -236,35 +297,324 @@ def save_price(
 
 
 # ============================================================
-# A101 ÜRÜN KEŞFİ
+# JSON-LD OKU
+# ============================================================
+
+def extract_jsonld(html):
+
+    results = []
+
+    blocks = re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>'
+        r'(.*?)'
+        r'</script>',
+        html,
+        re.S | re.I
+    )
+
+    for block in blocks:
+
+        block = block.strip()
+
+        if not block:
+            continue
+
+        try:
+
+            data = json.loads(
+                block
+            )
+
+            if isinstance(
+                data,
+                list
+            ):
+
+                results.extend(
+                    data
+                )
+
+            elif isinstance(
+                data,
+                dict
+            ):
+
+                results.append(
+                    data
+                )
+
+        except Exception:
+            continue
+
+    return results
+
+
+# ============================================================
+# A101 ÜRÜN ÇIKAR
+# ============================================================
+
+def parse_a101_jsonld(
+    html,
+    source_url
+):
+
+    products = []
+
+    objects = extract_jsonld(
+        html
+    )
+
+    for item in objects:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
+
+        item_type = item.get(
+            "@type",
+            ""
+        )
+
+        # @type bazen liste olabilir
+        if isinstance(
+            item_type,
+            list
+        ):
+
+            is_product = (
+                "Product"
+                in item_type
+            )
+
+        else:
+
+            is_product = (
+                item_type
+                == "Product"
+            )
+
+        if not is_product:
+            continue
+
+        name = clean_name(
+            item.get(
+                "name",
+                ""
+            )
+        )
+
+        if not name:
+            continue
+
+        sku = item.get(
+            "sku",
+            ""
+        )
+
+        brand = ""
+
+        brand_data = item.get(
+            "brand",
+            ""
+        )
+
+        if isinstance(
+            brand_data,
+            dict
+        ):
+
+            brand = brand_data.get(
+                "name",
+                ""
+            )
+
+        elif isinstance(
+            brand_data,
+            str
+        ):
+
+            brand = brand_data
+
+        offers = item.get(
+            "offers",
+            {}
+        )
+
+        price = None
+
+        if isinstance(
+            offers,
+            dict
+        ):
+
+            price = (
+                offers.get(
+                    "price"
+                )
+                or offers.get(
+                    "lowPrice"
+                )
+            )
+
+        product = save_product(
+            barcode=sku,
+            name=name,
+            brand=brand,
+            source="A101"
+        )
+
+        if product and price:
+
+            products.append(
+                (
+                    product,
+                    price,
+                    source_url
+                )
+            )
+
+    return products
+
+
+# ============================================================
+# A101 METİN FİYAT ÇIKARMA
+# ============================================================
+
+def parse_a101_text(
+    html,
+    source_url
+):
+
+    products = []
+
+    # HTML etiketlerini kaldır
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        html
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    # --------------------------------------------------------
+    # Ürün + ₺ fiyat
+    # --------------------------------------------------------
+
+    pattern = re.compile(
+        r"([A-Za-zÇĞİÖŞÜçğıöşü0-9"
+        r"%&'’+\-\/().,\" ]{4,160}?)"
+        r"\s*₺\s*"
+        r"([0-9]{1,6}"
+        r"(?:[.,][0-9]{1,2})?)",
+        re.I
+    )
+
+    matches = pattern.findall(
+        text
+    )
+
+    for name, price in matches:
+
+        name = clean_name(
+            name
+        )
+
+        price = parse_price(
+            price
+        )
+
+        if not name:
+            continue
+
+        if not price:
+            continue
+
+        # Çok uzun / anlamsız kayıtları at
+        if len(name) < 3:
+            continue
+
+        if len(name) > 180:
+            continue
+
+        # Menü / açıklama gibi metinleri at
+        bad_words = [
+            "tümünü gör",
+            "için",
+            "alışveriş",
+            "kategori",
+            "markalar",
+            "kampanya",
+        ]
+
+        normalized = normalize(
+            name
+        )
+
+        if any(
+            word in normalized
+            for word in bad_words
+        ):
+            continue
+
+        product = save_product(
+            barcode="",
+            name=name,
+            source="A101"
+        )
+
+        if product:
+
+            products.append(
+                (
+                    product,
+                    price,
+                    source_url
+                )
+            )
+
+    return products
+
+
+# ============================================================
+# A101 OTOMATİK KEŞİF
 # ============================================================
 
 def discover_a101():
 
     print("")
-    print("=" * 60)
-    print("A101 ÜRÜNLERİ KEŞFEDİLİYOR")
-    print("=" * 60)
+    print("=" * 70)
+    print("A101 ÜRÜNLERİ OTOMATİK KEŞFEDİLİYOR")
+    print("=" * 70)
 
-    products = []
+    all_products = []
 
     urls = [
         "https://www.a101.com.tr/",
         "https://www.a101.com.tr/market",
-        "https://www.a101.com.tr/arama?k=a",
+        "https://www.a101.com.tr/market?ind=True&page=2",
     ]
+
+    seen = set()
 
     for url in urls:
 
         try:
 
             print("")
-            print("A101 taranıyor:")
-            print(url)
+            print(
+                "A101 taranıyor:",
+                url
+            )
 
             response = session.get(
                 url,
-                timeout=30
+                timeout=40
             )
 
             print(
@@ -273,255 +623,63 @@ def discover_a101():
             )
 
             if response.status_code != 200:
-
-                print(
-                    "A101 sayfası alınamadı."
-                )
-
                 continue
 
             html = response.text
 
-            print(
-                "A101 HTML:",
-                len(html),
-                "karakter"
-            )
-
-
-            # =================================================
+            # ------------------------------------------------
             # JSON-LD
-            # =================================================
+            # ------------------------------------------------
 
-            json_blocks = re.findall(
-                r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>'
-                r'(.*?)'
-                r'</script>',
-                html,
-                re.S | re.I
+            jsonld_products = (
+                parse_a101_jsonld(
+                    html,
+                    url
+                )
             )
 
-            for block in json_blocks:
+            # ------------------------------------------------
+            # Normal HTML
+            # ------------------------------------------------
 
-                try:
+            text_products = (
+                parse_a101_text(
+                    html,
+                    url
+                )
+            )
 
-                    data = json.loads(block)
+            combined = (
+                jsonld_products
+                + text_products
+            )
 
-                    objects = []
+            for product, price, source_url in combined:
 
-                    if isinstance(data, dict):
-                        objects.append(data)
+                key = (
+                    product["barcode"],
+                    "A101"
+                )
 
-                    elif isinstance(data, list):
-                        objects.extend(data)
-
-                    for item in objects:
-
-                        if not isinstance(item, dict):
-                            continue
-
-                        item_type = item.get(
-                            "@type",
-                            ""
-                        )
-
-                        if item_type != "Product":
-                            continue
-
-                        name = clean_name(
-                            item.get(
-                                "name",
-                                ""
-                            )
-                        )
-
-                        if not name:
-                            continue
-
-                        offers = item.get(
-                            "offers",
-                            {}
-                        )
-
-                        price = None
-
-                        if isinstance(
-                            offers,
-                            dict
-                        ):
-
-                            price = offers.get(
-                                "price"
-                            )
-
-                        brand = ""
-
-                        brand_data = item.get(
-                            "brand",
-                            {}
-                        )
-
-                        if isinstance(
-                            brand_data,
-                            dict
-                        ):
-
-                            brand = brand_data.get(
-                                "name",
-                                ""
-                            )
-
-                        product = save_product(
-                            barcode=item.get(
-                                "sku",
-                                ""
-                            ),
-                            name=name,
-                            brand=brand,
-                            source="A101",
-                        )
-
-                        if product and price:
-
-                            products.append(
-                                (
-                                    product,
-                                    price,
-                                    url
-                                )
-                            )
-
-                except Exception:
+                if key in seen:
                     continue
 
+                seen.add(key)
 
-            # =================================================
-            # SAYFA METNİ
-            # =================================================
-
-            page_text = re.sub(
-                r"<script.*?</script>",
-                " ",
-                html,
-                flags=re.S | re.I
-            )
-
-            page_text = re.sub(
-                r"<style.*?</style>",
-                " ",
-                page_text,
-                flags=re.S | re.I
-            )
-
-            page_text = re.sub(
-                r"<[^>]+>",
-                " ",
-                page_text
-            )
-
-            page_text = re.sub(
-                r"\s+",
-                " ",
-                page_text
-            )
-
-            page_text = page_text.strip()
-
-
-            # =================================================
-            # A101 FİYAT FORMATLARI
-            #
-            # Örnek:
-            #
-            # Ürün adı ₺119,00
-            #
-            # Ürün adı ₺249,00 ₺199,00
-            # =================================================
-
-            pattern = re.compile(
-                r'([A-Za-zÇĞİÖŞÜçğıöşü0-9%'
-                r'&\-\+\(\)/,.\'’" ]{4,150}?)'
-                r'\s*₺\s*'
-                r'([0-9]{1,3}'
-                r'(?:\.[0-9]{3})?'
-                r'(?:,[0-9]{1,2})?)',
-                re.I
-            )
-
-            matches = pattern.findall(
-                page_text
-            )
-
+                all_products.append(
+                    (
+                        product,
+                        price,
+                        source_url
+                    )
+                )
 
             print(
-                "A101 fiyat eşleşmesi:",
-                len(matches)
+                "A101 bu sayfadan bulunan:",
+                len(combined)
             )
-
-
-            for name, price in matches:
-
-                name = clean_name(name)
-
-                if len(name) < 3:
-                    continue
-
-                # Menü/başlık gibi gereksiz kayıtları ele
-                bad_words = [
-                    "tümünü gör",
-                    "sepete ekle",
-                    "önerilen",
-                    "fiyat",
-                    "indirim",
-                    "market",
-                    "ürün bulundu",
-                    "peşin fiyatına",
-                ]
-
-                normalized_name = normalize(
-                    name
-                )
-
-                skip = False
-
-                for bad in bad_words:
-
-                    if normalize(bad) in normalized_name:
-
-                        skip = True
-                        break
-
-                if skip:
-                    continue
-
-
-                parsed = parse_price(
-                    price
-                )
-
-                if not parsed:
-                    continue
-
-
-                product = save_product(
-                    barcode="",
-                    name=name,
-                    source="A101",
-                )
-
-                if product:
-
-                    products.append(
-                        (
-                            product,
-                            parsed,
-                            url
-                        )
-                    )
-
 
             time.sleep(2)
-
 
         except Exception as e:
 
@@ -530,14 +688,13 @@ def discover_a101():
                 str(e)
             )
 
-
-    # ============================================================
-    # FİYATLARI FIRESTORE'A YAZ
-    # ============================================================
+    # --------------------------------------------------------
+    # FIRESTORE
+    # --------------------------------------------------------
 
     saved = 0
 
-    for product, price, url in products:
+    for product, price, url in all_products:
 
         if save_price(
             product,
@@ -545,34 +702,233 @@ def discover_a101():
             price,
             url
         ):
-
             saved += 1
-
 
     print("")
     print(
-        "A101 keşfedilen kayıt:",
-        len(products)
+        "A101 toplam keşfedilen:",
+        len(all_products)
     )
 
     print(
-        "A101 kaydedilen fiyat:",
+        "A101 toplam kaydedilen fiyat:",
         saved
     )
+
+    return all_products
+
+
+# ============================================================
+# ŞOK JSON-LD
+# ============================================================
+
+def parse_sok_jsonld(
+    html,
+    source_url
+):
+
+    products = []
+
+    objects = extract_jsonld(
+        html
+    )
+
+    for item in objects:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
+
+        item_type = item.get(
+            "@type",
+            ""
+        )
+
+        if isinstance(
+            item_type,
+            list
+        ):
+
+            is_product = (
+                "Product"
+                in item_type
+            )
+
+        else:
+
+            is_product = (
+                item_type
+                == "Product"
+            )
+
+        if not is_product:
+            continue
+
+        name = clean_name(
+            item.get(
+                "name",
+                ""
+            )
+        )
+
+        if not name:
+            continue
+
+        brand = ""
+
+        brand_data = item.get(
+            "brand",
+            ""
+        )
+
+        if isinstance(
+            brand_data,
+            dict
+        ):
+
+            brand = brand_data.get(
+                "name",
+                ""
+            )
+
+        elif isinstance(
+            brand_data,
+            str
+        ):
+
+            brand = brand_data
+
+        offers = item.get(
+            "offers",
+            {}
+        )
+
+        price = None
+
+        if isinstance(
+            offers,
+            dict
+        ):
+
+            price = (
+                offers.get(
+                    "price"
+                )
+                or offers.get(
+                    "lowPrice"
+                )
+            )
+
+        product = save_product(
+            barcode=item.get(
+                "sku",
+                ""
+            ),
+            name=name,
+            brand=brand,
+            source="SOK"
+        )
+
+        if product and price:
+
+            products.append(
+                (
+                    product,
+                    price,
+                    source_url
+                )
+            )
 
     return products
 
 
 # ============================================================
-# ŞOK
+# ŞOK METİN
+# ============================================================
+
+def parse_sok_text(
+    html,
+    source_url
+):
+
+    products = []
+
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        html
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    pattern = re.compile(
+        r"([A-Za-zÇĞİÖŞÜçğıöşü0-9"
+        r"%&'’+\-\/().,\" ]{4,160}?)"
+        r"\s+"
+        r"([0-9]{1,6}"
+        r"(?:[.,][0-9]{1,2})?)"
+        r"\s*₺",
+        re.I
+    )
+
+    matches = pattern.findall(
+        text
+    )
+
+    for name, price in matches:
+
+        name = clean_name(
+            name
+        )
+
+        price = parse_price(
+            price
+        )
+
+        if not name or not price:
+            continue
+
+        if len(name) < 3:
+            continue
+
+        if len(name) > 180:
+            continue
+
+        product = save_product(
+            barcode="",
+            name=name,
+            source="SOK"
+        )
+
+        if product:
+
+            products.append(
+                (
+                    product,
+                    price,
+                    source_url
+                )
+            )
+
+    return products
+
+
+# ============================================================
+# ŞOK OTOMATİK KEŞİF
 # ============================================================
 
 def discover_sok():
 
     print("")
-    print("=" * 60)
-    print("ŞOK ÜRÜNLERİ KEŞFEDİLİYOR")
-    print("=" * 60)
+    print("=" * 70)
+    print("ŞOK ÜRÜNLERİ OTOMATİK KEŞFEDİLİYOR")
+    print("=" * 70)
 
     products = []
 
@@ -584,7 +940,7 @@ def discover_sok():
 
         response = session.get(
             url,
-            timeout=30
+            timeout=40
         )
 
         print(
@@ -597,164 +953,46 @@ def discover_sok():
 
         html = response.text
 
-
-        # JSON-LD
-        json_blocks = re.findall(
-            r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>'
-            r'(.*?)'
-            r'</script>',
-            html,
-            re.S | re.I
+        jsonld_products = (
+            parse_sok_jsonld(
+                html,
+                url
+            )
         )
 
-        for block in json_blocks:
-
-            try:
-
-                data = json.loads(block)
-
-                objects = []
-
-                if isinstance(data, dict):
-                    objects.append(data)
-
-                elif isinstance(data, list):
-                    objects.extend(data)
-
-                for item in objects:
-
-                    if not isinstance(item, dict):
-                        continue
-
-                    if item.get(
-                        "@type"
-                    ) != "Product":
-                        continue
-
-                    name = clean_name(
-                        item.get(
-                            "name",
-                            ""
-                        )
-                    )
-
-                    offers = item.get(
-                        "offers",
-                        {}
-                    )
-
-                    price = None
-
-                    if isinstance(
-                        offers,
-                        dict
-                    ):
-
-                        price = offers.get(
-                            "price"
-                        )
-
-                    brand = ""
-
-                    brand_data = item.get(
-                        "brand",
-                        {}
-                    )
-
-                    if isinstance(
-                        brand_data,
-                        dict
-                    ):
-
-                        brand = brand_data.get(
-                            "name",
-                            ""
-                        )
-
-                    product = save_product(
-                        barcode=item.get(
-                            "sku",
-                            ""
-                        ),
-                        name=name,
-                        brand=brand,
-                        source="SOK",
-                    )
-
-                    if product and price:
-
-                        products.append(
-                            (
-                                product,
-                                price,
-                                url
-                            )
-                        )
-
-            except Exception:
-                continue
-
-
-        # Sayfa metni
-        page_text = re.sub(
-            r"<[^>]+>",
-            " ",
-            html
+        text_products = (
+            parse_sok_text(
+                html,
+                url
+            )
         )
 
-        page_text = re.sub(
-            r"\s+",
-            " ",
-            page_text
+        combined = (
+            jsonld_products
+            + text_products
         )
 
+        seen = set()
 
-        pattern = re.compile(
-            r'([A-ZÇĞİÖŞÜ'
-            r'a-zçğıöşü0-9%'
-            r' \-+*/().,&]{3,150}?)'
-            r'\s+'
-            r'([0-9]{1,5}'
-            r'(?:[.,][0-9]{1,2})?)'
-            r'\s*₺',
-            re.I
-        )
+        for product, price, source_url in combined:
 
-        matches = pattern.findall(
-            page_text
-        )
-
-
-        for name, price in matches:
-
-            name = clean_name(name)
-
-            if len(name) < 3:
-                continue
-
-            parsed = parse_price(
-                price
+            key = (
+                product["barcode"],
+                "ŞOK"
             )
 
-            if not parsed:
+            if key in seen:
                 continue
 
-            product = save_product(
-                barcode="",
-                name=name,
-                source="SOK",
-            )
+            seen.add(key)
 
-            if product:
-
-                products.append(
-                    (
-                        product,
-                        parsed,
-                        url
-                    )
+            products.append(
+                (
+                    product,
+                    price,
+                    source_url
                 )
-
+            )
 
         saved = 0
 
@@ -766,20 +1004,18 @@ def discover_sok():
                 price,
                 source_url
             ):
-
                 saved += 1
 
-
+        print("")
         print(
-            "ŞOK keşfedilen kayıt:",
+            "ŞOK toplam keşfedilen:",
             len(products)
         )
 
         print(
-            "ŞOK kaydedilen fiyat:",
+            "ŞOK toplam kaydedilen:",
             saved
         )
-
 
     except Exception as e:
 
@@ -788,12 +1024,11 @@ def discover_sok():
             str(e)
         )
 
-
     return products
 
 
 # ============================================================
-# FIRESTORE ÜRÜNLERİ
+# FIRESTORE ÜRÜNLER
 # ============================================================
 
 def get_firestore_products():
@@ -806,7 +1041,8 @@ def get_firestore_products():
     products = []
 
     docs = (
-        db.collection("products")
+        db
+        .collection("products")
         .stream()
     )
 
@@ -817,7 +1053,12 @@ def get_firestore_products():
         if not data:
             continue
 
-        if not data.get("name"):
+        name = data.get(
+            "name",
+            ""
+        )
+
+        if not name:
             continue
 
         products.append(
@@ -826,10 +1067,7 @@ def get_firestore_products():
                     "barcode",
                     doc.id
                 ),
-                "name": data.get(
-                    "name",
-                    ""
-                ),
+                "name": name,
                 "brand": data.get(
                     "brand",
                     ""
@@ -850,50 +1088,59 @@ def get_firestore_products():
 
 
 # ============================================================
+# ÖZET
+# ============================================================
+
+def print_summary():
+
+    print("")
+    print("=" * 70)
+    print("FİYAT MOTORU ÖZET")
+    print("=" * 70)
+
+    products = get_firestore_products()
+
+    print(
+        "Toplam ürün:",
+        len(products)
+    )
+
+    print("")
+    print(
+        "A101 + ŞOK fiyat motoru tamamlandı."
+    )
+
+    print("=" * 70)
+
+
+# ============================================================
 # ANA MOTOR
 # ============================================================
 
 def update_products():
 
     print("")
-    print("=" * 60)
+    print("=" * 70)
     print("UCUZA OTOMATİK FİYAT MOTORU BAŞLADI")
-    print("=" * 60)
+    print("=" * 70)
 
-
+    # --------------------------------------------------------
     # A101
-    a101_products = discover_a101()
+    # --------------------------------------------------------
 
+    discover_a101()
 
+    # --------------------------------------------------------
     # ŞOK
-    sok_products = discover_sok()
+    # --------------------------------------------------------
 
+    discover_sok()
 
-    # Firestore
-    products = get_firestore_products()
+    # --------------------------------------------------------
+    # ÖZET
+    # --------------------------------------------------------
 
-
-    print("")
-    print("=" * 60)
-    print("SONUÇ")
-    print("=" * 60)
-
-    print(
-        "A101 kayıtları:",
-        len(a101_products)
-    )
-
-    print(
-        "ŞOK kayıtları:",
-        len(sok_products)
-    )
-
-    print(
-        "Firestore ürünleri:",
-        len(products)
-    )
-
-    print("=" * 60)
+    print_summary()
 
 
 # ============================================================
