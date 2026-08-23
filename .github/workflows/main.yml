@@ -1,0 +1,29 @@
+name: UCUZA Fiyat Motoru
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  update-prices:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu indir
+        uses: actions/checkout@v4
+
+      - name: Python kurulumu
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Paketleri kur
+        run: |
+          pip install -r requirements.txt
+
+      - name: Fiyat motorunu çalıştır
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          python price_engine.py
