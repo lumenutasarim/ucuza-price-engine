@@ -1,11 +1,39 @@
 import os
 import json
 import re
+import time
+import hashlib
+from datetime import datetime, timezone
+
 import requests
 from bs4 import BeautifulSoup
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+
+# =========================================================
+# UCUZA - FINAL PRICE ENGINE
+# =========================================================
+#
+# Barkod:
+#   YOK
+#
+# Manuel PRODUCTS listesi:
+#   YOK
+#
+# Sahte fiyat:
+#   YOK
+#
+# Sistem:
+#   Market kataloglarını tarar
+#   Ürünleri otomatik çıkarır
+#   Fiyatları gerçek sayfadan almaya çalışır
+#   Firestore'a kaydeder
+#
+# Firebase:
+#   FIREBASE_SERVICE_ACCOUNT GitHub Secret kullanılır.
+# =========================================================
 
 
 # =========================================================
@@ -15,33 +43,62 @@ from firebase_admin import credentials, firestore
 service_account = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 
 if not service_account:
-    raise RuntimeError("FIREBASE_SERVICE_ACCOUNT bulunamadı.")
+    raise RuntimeError(
+        "FIREBASE_SERVICE_ACCOUNT GitHub Secret bulunamadı."
+    )
 
-cred = credentials.Certificate(json.loads(service_account))
+try:
+    service_account_data = json.loads(service_account)
+except json.JSONDecodeError as e:
+    raise RuntimeError(
+        "FIREBASE_SERVICE_ACCOUNT geçerli JSON değil."
+    ) from e
+
 
 if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred)
+
+    cred = credentials.Certificate(
+        service_account_data
+    )
+
+    firebase_admin.initialize_app(
+        cred
+    )
+
 
 db = firestore.client()
 
 
 # =========================================================
-# ÜRÜNLER
+# AYARLAR
 # =========================================================
-#
-# Mevcut ürününü koruyoruz.
-# Daha sonra burayı Firestore'dan otomatik okuyacağız.
-#
 
-PRODUCTS = [
-    {
-        "barcode": "8690504010011",
-        "name": "Yumurta",
-        "brand": "Bili Bili",
-        "quantity": "30'lu",
-        "unit": "1 adet"
+REQUEST_TIMEOUT = 30
+
+REQUEST_DELAY = 1.0
+
+MIN_PRICE = 0.50
+
+MAX_PRICE = 100000.0
+
+MAX_PRODUCTS_PER_STORE = 5000
+
+
+# =========================================================
+# MARKETLER
+# =========================================================
+
+MARKETS = {
+
+    "ŞOK": {
+        "url": "https://www.sokmarket.com.tr/market-c-10"
+    },
+
+    "A101": {
+        "url": "https://www.a101.com.tr/market"
     }
-]
+
+}
 
 
 # =========================================================
@@ -49,35 +106,147 @@ PRODUCTS = [
 # =========================================================
 
 HEADERS = {
+
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/139.0 Safari/537.36"
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/139.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8"
+
+    "Accept": (
+        "text/html,"
+        "application/xhtml+xml,"
+        "application/xml;q=0.9,"
+        "image/avif,"
+        "image/webp,"
+        "*/*;q=0.8"
+    ),
+
+    "Accept-Language":
+        "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+
+    "Connection":
+        "keep-alive"
+
 }
 
 
-def get_page(url):
-    try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=25
-        )
+session = requests.Session()
 
-        response.raise_for_status()
-
-        return response.text
-
-    except Exception as e:
-        print(f"Sayfa alınamadı: {url}")
-        print(e)
-        return None
+session.headers.update(
+    HEADERS
+)
 
 
 # =========================================================
-# FİYAT TEMİZLEME
+# NORMALIZE
+# =========================================================
+
+def normalize(text):
+
+    if text is None:
+        return ""
+
+    text = str(text)
+
+    text = text.lower()
+
+    replacements = {
+
+        "ç": "c",
+        "ğ": "g",
+        "ı": "i",
+        "ö": "o",
+        "ş": "s",
+        "ü": "u",
+
+        "â": "a",
+        "î": "i",
+        "û": "u"
+
+    }
+
+    for old, new in replacements.items():
+
+        text = text.replace(
+            old,
+            new
+        )
+
+    text = re.sub(
+        r"[^a-z0-9.,%/'\- ]",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+# =========================================================
+# SLUG
+# =========================================================
+
+def make_slug(text):
+
+    normalized = normalize(
+        text
+    )
+
+    normalized = normalized.replace(
+        "%",
+        " yuzde "
+    )
+
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        normalized
+    )
+
+    normalized = normalized.strip(
+        "-"
+    )
+
+    if not normalized:
+
+        normalized = "urun"
+
+    return normalized[:120]
+
+
+# =========================================================
+# ÜRÜN ID
+# =========================================================
+
+def make_product_id(
+    name,
+    brand,
+    quantity
+):
+
+    raw = "|".join(
+        [
+            normalize(name),
+            normalize(brand),
+            normalize(quantity)
+        ]
+    )
+
+    return hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()[:24]
+
+
+# =========================================================
+# FİYAT PARSE
 # =========================================================
 
 def parse_price(value):
@@ -87,274 +256,1272 @@ def parse_price(value):
 
     value = str(value)
 
-    value = value.replace("₺", "")
-    value = value.replace("TL", "")
-    value = value.replace("tl", "")
-    value = value.strip()
+    value = (
+        value
+        .replace("₺", "")
+        .replace("TL", "")
+        .replace("tl", "")
+        .replace("TRY", "")
+        .strip()
+    )
 
-    # 1.299,90 -> 1299.90
-    if "," in value:
-        value = value.replace(".", "")
-        value = value.replace(",", ".")
+    value = re.sub(
+        r"[^0-9,.\-]",
+        "",
+        value
+    )
 
-    # sadece sayı
-    value = re.sub(r"[^0-9.]", "", value)
+    if not value:
+
+        return None
 
     try:
-        price = float(value)
 
-        if price <= 0:
+        # 1.299,90
+        if "," in value:
+
+            value = value.replace(
+                ".",
+                ""
+            )
+
+            value = value.replace(
+                ",",
+                "."
+            )
+
+        # 1299.90
+        elif value.count(".") == 1:
+
+            parts = value.split(".")
+
+            if (
+                len(parts[-1]) == 3
+                and len(parts[0]) <= 3
+            ):
+
+                value = value.replace(
+                    ".",
+                    ""
+                )
+
+        # 1.299.900
+        elif value.count(".") > 1:
+
+            value = value.replace(
+                ".",
+                ""
+            )
+
+        price = float(
+            value
+        )
+
+        if price < MIN_PRICE:
             return None
 
-        return price
+        if price > MAX_PRICE:
+            return None
 
-    except:
+        return round(
+            price,
+            2
+        )
+
+    except (ValueError, TypeError):
+
         return None
 
 
 # =========================================================
-# FIRESTORE'A FİYAT KAYDET
+# SAYFA AL
 # =========================================================
 
-def save_price(product, store, price):
+def get_page(url):
 
-    price = parse_price(price)
+    try:
 
-    if price is None:
-        return False
+        response = session.get(
+            url,
+            timeout=REQUEST_TIMEOUT
+        )
 
-    ref = (
-        db.collection("prices")
-        .document(product["barcode"])
-        .collection("stores")
-        .document(store)
+        print(
+            f"[HTTP] {response.status_code} "
+            f"{url}"
+        )
+
+        if response.status_code != 200:
+
+            print(
+                f"[HTTP] Sayfa alınamadı: "
+                f"{response.status_code}"
+            )
+
+            return None
+
+        return response.text
+
+    except requests.RequestException as e:
+
+        print(
+            f"[HTTP] Hata: {e}"
+        )
+
+        return None
+
+
+# =========================================================
+# JSON-LD ÜRÜNLERİ
+# =========================================================
+
+def extract_json_ld_products(
+    soup
+):
+
+    products = []
+
+    scripts = soup.find_all(
+        "script",
+        type="application/ld+json"
     )
 
-    ref.set(
+    for script in scripts:
+
+        raw = script.string
+
+        if not raw:
+            continue
+
+        try:
+
+            data = json.loads(
+                raw
+            )
+
+        except Exception:
+
+            continue
+
+        candidates = []
+
+        if isinstance(data, list):
+
+            candidates.extend(
+                data
+            )
+
+        elif isinstance(data, dict):
+
+            candidates.append(
+                data
+            )
+
+            graph = data.get(
+                "@graph"
+            )
+
+            if isinstance(
+                graph,
+                list
+            ):
+
+                candidates.extend(
+                    graph
+                )
+
+        for item in candidates:
+
+            if not isinstance(
+                item,
+                dict
+            ):
+                continue
+
+            item_type = item.get(
+                "@type"
+            )
+
+            if isinstance(
+                item_type,
+                list
+            ):
+
+                is_product = (
+                    "Product"
+                    in item_type
+                )
+
+            else:
+
+                is_product = (
+                    item_type
+                    == "Product"
+                )
+
+            if not is_product:
+                continue
+
+            name = item.get(
+                "name"
+            )
+
+            if not name:
+                continue
+
+            offers = item.get(
+                "offers"
+            )
+
+            price = None
+
+            if isinstance(
+                offers,
+                dict
+            ):
+
+                price = offers.get(
+                    "price"
+                )
+
+            elif isinstance(
+                offers,
+                list
+            ):
+
+                for offer in offers:
+
+                    if isinstance(
+                        offer,
+                        dict
+                    ):
+
+                        price = offer.get(
+                            "price"
+                        )
+
+                        if price is not None:
+                            break
+
+            price = parse_price(
+                price
+            )
+
+            if price is None:
+                continue
+
+            brand = ""
+
+            brand_data = item.get(
+                "brand"
+            )
+
+            if isinstance(
+                brand_data,
+                dict
+            ):
+
+                brand = (
+                    brand_data.get(
+                        "name"
+                    )
+                    or ""
+                )
+
+            elif brand_data:
+
+                brand = str(
+                    brand_data
+                )
+
+            sku = (
+                item.get("sku")
+                or item.get("mpn")
+                or ""
+            )
+
+            products.append(
+                {
+                    "name": str(name).strip(),
+                    "brand": str(brand).strip(),
+                    "quantity": "",
+                    "price": price,
+                    "sku": str(sku).strip()
+                }
+            )
+
+    return products
+
+
+# =========================================================
+# HTML ÜRÜN KARTLARI
+# =========================================================
+
+def extract_html_products(
+    soup
+):
+
+    products = []
+
+    selectors = [
+
+        "[data-product]",
+
+        "[data-product-id]",
+
+        "[data-testid*='product']",
+
+        ".product",
+
+        ".product-card",
+
+        ".product-item",
+
+        ".productBox",
+
+        ".product-box",
+
+        "article"
+
+    ]
+
+    seen = set()
+
+    elements = []
+
+    for selector in selectors:
+
+        try:
+
+            elements.extend(
+                soup.select(
+                    selector
+                )
+            )
+
+        except Exception:
+
+            continue
+
+    for element in elements:
+
+        text = element.get_text(
+            " ",
+            strip=True
+        )
+
+        if not text:
+            continue
+
+        if len(text) > 1000:
+            continue
+
+        price = None
+
+        # -------------------------------------------------
+        # Price attribute
+        # -------------------------------------------------
+
+        for attr in [
+
+            "data-price",
+            "data-product-price",
+            "data-sale-price",
+            "data-current-price"
+
+        ]:
+
+            value = element.get(
+                attr
+            )
+
+            if value:
+
+                price = parse_price(
+                    value
+                )
+
+                if price is not None:
+                    break
+
+        # -------------------------------------------------
+        # Fiyat metni
+        # -------------------------------------------------
+
+        if price is None:
+
+            patterns = [
+
+                r"₺\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)",
+
+                r"([0-9]{1,5}(?:[.,][0-9]{1,2})?)\s*₺",
+
+                r"([0-9]{1,5}(?:[.,][0-9]{1,2})?)\s*TL",
+
+                r"TL\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)"
+
+            ]
+
+            for pattern in patterns:
+
+                match = re.search(
+                    pattern,
+                    text,
+                    re.IGNORECASE
+                )
+
+                if match:
+
+                    price = parse_price(
+                        match.group(1)
+                    )
+
+                    if price is not None:
+                        break
+
+        if price is None:
+            continue
+
+        # -------------------------------------------------
+        # Ürün ismi
+        # -------------------------------------------------
+
+        name = ""
+
+        for selector in [
+
+            "[class*='product-name']",
+
+            "[class*='productName']",
+
+            "[class*='name']",
+
+            "[class*='title']",
+
+            "h2",
+
+            "h3",
+
+            "h4"
+
+        ]:
+
+            node = element.select_one(
+                selector
+            )
+
+            if node:
+
+                candidate = node.get_text(
+                    " ",
+                    strip=True
+                )
+
+                if (
+                    candidate
+                    and len(candidate) >= 3
+                ):
+
+                    name = candidate
+                    break
+
+        if not name:
+
+            name = text
+
+        # -------------------------------------------------
+        # Temizlik
+        # -------------------------------------------------
+
+        name = re.sub(
+            r"\s+",
+            " ",
+            name
+        ).strip()
+
+        if len(name) < 3:
+            continue
+
+        key = (
+            normalize(name),
+            price
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(
+            key
+        )
+
+        products.append(
+            {
+                "name": name,
+                "brand": "",
+                "quantity": "",
+                "price": price,
+                "sku": ""
+            }
+        )
+
+        if len(products) >= MAX_PRODUCTS_PER_STORE:
+            break
+
+    return products
+
+
+# =========================================================
+# GENEL SAYFA ÜRÜN ÇIKARMA
+# =========================================================
+
+def extract_products(
+    html
+):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    products = []
+
+    # Öncelik JSON-LD
+    products.extend(
+        extract_json_ld_products(
+            soup
+        )
+    )
+
+    # HTML kartları
+    products.extend(
+        extract_html_products(
+            soup
+        )
+    )
+
+    # Aynı ürünleri temizle
+    unique = {}
+
+    for product in products:
+
+        name = product.get(
+            "name",
+            ""
+        )
+
+        price = product.get(
+            "price"
+        )
+
+        if not name:
+            continue
+
+        if price is None:
+            continue
+
+        key = (
+            normalize(name),
+            normalize(
+                product.get(
+                    "brand",
+                    ""
+                )
+            ),
+            price
+        )
+
+        unique[key] = product
+
+    return list(
+        unique.values()
+    )
+
+
+# =========================================================
+# MARKA TAHMİNİ
+# =========================================================
+
+KNOWN_BRANDS = [
+
+    "Sütaş",
+    "İçim",
+    "Pınar",
+    "Ülker",
+    "Eti",
+    "Torku",
+    "Filiz",
+    "Barilla",
+    "Çaykur",
+    "Lipton",
+    "Ariel",
+    "OMO",
+    "Persil",
+    "Fairy",
+    "Finish",
+    "Nescafé",
+    "Coca Cola",
+    "Pepsi",
+    "Erikli",
+    "Hayat",
+    "Saka",
+    "Mis",
+    "Dost",
+    "Birşah",
+    "Bili Bili",
+    "Lider"
+
+]
+
+
+def detect_brand(
+    name,
+    current_brand=""
+):
+
+    if current_brand:
+
+        return current_brand.strip()
+
+    normalized_name = normalize(
+        name
+    )
+
+    for brand in KNOWN_BRANDS:
+
+        if normalize(
+            brand
+        ) in normalized_name:
+
+            return brand
+
+    return ""
+
+
+# =========================================================
+# MİKTAR TAHMİNİ
+# =========================================================
+
+def detect_quantity(
+    name,
+    current_quantity=""
+):
+
+    if current_quantity:
+
+        return current_quantity.strip()
+
+    patterns = [
+
+        r"\b\d+(?:[.,]\d+)?\s*kg\b",
+
+        r"\b\d+(?:[.,]\d+)?\s*g\b",
+
+        r"\b\d+(?:[.,]\d+)?\s*ml\b",
+
+        r"\b\d+(?:[.,]\d+)?\s*l\b",
+
+        r"\b\d+\s*lt\b",
+
+        r"\b\d+\s*li\b",
+
+        r"\b\d+'\s*lu\b",
+
+        r"\b\d+\s*lu\b",
+
+        r"\b\d+\s*'lu\b"
+
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            name,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            return re.sub(
+                r"\s+",
+                " ",
+                match.group(0)
+            ).strip()
+
+    return ""
+
+
+# =========================================================
+# ÜRÜN TEMİZLEME
+# =========================================================
+
+def clean_product(
+    raw,
+    store
+):
+
+    name = str(
+        raw.get(
+            "name",
+            ""
+        )
+    ).strip()
+
+    if not name:
+        return None
+
+    price = parse_price(
+        raw.get(
+            "price"
+        )
+    )
+
+    if price is None:
+        return None
+
+    brand = detect_brand(
+        name,
+        raw.get(
+            "brand",
+            ""
+        )
+    )
+
+    quantity = detect_quantity(
+        name,
+        raw.get(
+            "quantity",
+            ""
+        )
+    )
+
+    product_id = make_product_id(
+        name,
+        brand,
+        quantity
+    )
+
+    return {
+
+        "productId":
+            product_id,
+
+        "name":
+            name,
+
+        "brand":
+            brand,
+
+        "quantity":
+            quantity,
+
+        "price":
+            price,
+
+        "store":
+            store,
+
+        "sku":
+            raw.get(
+                "sku",
+                ""
+            ),
+
+        "normalizedName":
+            normalize(name),
+
+        "updatedAt":
+            firestore.SERVER_TIMESTAMP,
+
+        "source":
+            "automatic_catalog"
+
+    }
+
+
+# =========================================================
+# FIRESTORE - ÜRÜN KATALOĞU
+# =========================================================
+
+def save_catalog_product(
+    product
+):
+
+    product_id = product[
+        "productId"
+    ]
+
+    store = product[
+        "store"
+    ]
+
+    # ----------------------------------------------
+    # products koleksiyonu
+    # ----------------------------------------------
+
+    product_ref = (
+        db.collection(
+            "products"
+        )
+        .document(
+            product_id
+        )
+    )
+
+    product_ref.set(
         {
-            "barcode": product["barcode"],
-            "productName": product["name"],
-            "brand": product["brand"],
-            "quantity": product["quantity"],
-            "unit": product["unit"],
-            "store": store,
-            "price": price,
-            "currency": "TRY",
-            "updatedAt": firestore.SERVER_TIMESTAMP
+            "productId":
+                product_id,
+
+            "name":
+                product["name"],
+
+            "brand":
+                product["brand"],
+
+            "quantity":
+                product["quantity"],
+
+            "normalizedName":
+                product["normalizedName"],
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "source":
+                "automatic_catalog"
+
         },
         merge=True
     )
 
+    # ----------------------------------------------
+    # prices koleksiyonu
+    # ----------------------------------------------
+
+    price_ref = (
+        db.collection(
+            "prices"
+        )
+        .document(
+            product_id
+        )
+        .collection(
+            "stores"
+        )
+        .document(
+            make_slug(store)
+        )
+    )
+
+    price_ref.set(
+        {
+            "productId":
+                product_id,
+
+            "productName":
+                product["name"],
+
+            "brand":
+                product["brand"],
+
+            "quantity":
+                product["quantity"],
+
+            "store":
+                store,
+
+            "price":
+                product["price"],
+
+            "currency":
+                "TRY",
+
+            "source":
+                "automatic_catalog",
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP
+
+        },
+        merge=True
+    )
+
+
+# =========================================================
+# FIRESTORE - MARKET DURUMU
+# =========================================================
+
+def save_market_status(
+    store,
+    status,
+    product_count=0,
+    error=""
+):
+
+    ref = (
+        db.collection(
+            "market_status"
+        )
+        .document(
+            make_slug(store)
+        )
+    )
+
+    ref.set(
+        {
+
+            "store":
+                store,
+
+            "status":
+                status,
+
+            "productCount":
+                product_count,
+
+            "error":
+                error,
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP
+
+        },
+        merge=True
+    )
+
+
+# =========================================================
+# MARKET TARA
+# =========================================================
+
+def scan_market(
+    store,
+    url
+):
+
+    print("")
     print(
-        f"[FIRESTORE] {store} | "
-        f"{product['name']} | "
-        f"{price:.2f} TL"
+        "======================================"
     )
 
-    return True
-
-
-# =========================================================
-# GENEL ÜRÜN EŞLEŞTİRME
-# =========================================================
-
-def normalize(text):
-
-    if not text:
-        return ""
-
-    text = text.lower()
-
-    replacements = {
-        "ç": "c",
-        "ğ": "g",
-        "ı": "i",
-        "ö": "o",
-        "ş": "s",
-        "ü": "u"
-    }
-
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    text = re.sub(r"[^a-z0-9 ]", " ", text)
-
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
-
-
-def product_matches(product, text):
-
-    text = normalize(text)
-
-    name = normalize(product["name"])
-    brand = normalize(product["brand"])
-    quantity = normalize(product["quantity"])
-
-    score = 0
-
-    if name and name in text:
-        score += 3
-
-    if brand and brand in text:
-        score += 3
-
-    if quantity and quantity in text:
-        score += 2
-
-    return score >= 5
-
-
-# =========================================================
-# ŞOK
-# =========================================================
-
-def scan_sok(product):
-
-    print("ŞOK kontrol ediliyor...")
-
-    url = "https://www.sokmarket.com.tr/market-c-10"
-
-    html = get_page(url)
-
-    if not html:
-        return
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    found = []
-
-    # Sayfadaki tüm metinleri kontrol ediyoruz.
-    texts = soup.stripped_strings
-
-    for text in texts:
-
-        text = str(text).strip()
-
-        if product_matches(product, text):
-
-            found.append(text)
-
-    # Sayfadaki ürün bloklarından fiyat yakalamaya çalış
-    page_text = soup.get_text(" ", strip=True)
-
-    if product_matches(product, page_text):
-
-        prices = re.findall(
-            r"(\d{1,5}(?:[.,]\d{1,2})?)\s*₺",
-            page_text
-        )
-
-        for price in prices:
-
-            parsed = parse_price(price)
-
-            if parsed:
-
-                save_price(
-                    product,
-                    "ŞOK",
-                    parsed
-                )
-
-                return
-
-    print("ŞOK: uygun fiyat bulunamadı.")
-
-
-# =========================================================
-# A101
-# =========================================================
-
-def scan_a101(product):
-
-    print("A101 kontrol ediliyor...")
-
-    url = "https://www.a101.com.tr/market"
-
-    html = get_page(url)
-
-    if not html:
-        return
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    page_text = soup.get_text(" ", strip=True)
-
-    if not product_matches(product, page_text):
-
-        print("A101: ürün sayfada bulunamadı.")
-
-        return
-
-    prices = re.findall(
-        r"₺\s*([0-9.]+(?:,[0-9]{1,2})?)",
-        page_text
+    print(
+        f"{store} TARANIYOR"
     )
 
-    if not prices:
+    print(
+        "======================================"
+    )
 
-        prices = re.findall(
-            r"([0-9.]+(?:,[0-9]{1,2})?)\s*₺",
-            page_text
+    html = get_page(
+        url
+    )
+
+    if not html:
+
+        save_market_status(
+            store,
+            "error",
+            0,
+            "Market sayfasına erişilemedi."
         )
 
-    for price in prices:
+        return 0
 
-        parsed = parse_price(price)
+    products = extract_products(
+        html
+    )
 
-        if parsed:
+    print(
+        f"{store}: "
+        f"{len(products)} ürün bulundu."
+    )
 
-            save_price(
-                product,
-                "A101",
-                parsed
+    if not products:
+
+        save_market_status(
+            store,
+            "no_data",
+            0,
+            "Sayfada otomatik ürün verisi bulunamadı."
+        )
+
+        return 0
+
+    saved = 0
+
+    for raw in products:
+
+        product = clean_product(
+            raw,
+            store
+        )
+
+        if not product:
+            continue
+
+        try:
+
+            save_catalog_product(
+                product
             )
 
-            return
+            saved += 1
 
-    print("A101: fiyat bulunamadı.")
+            print(
+                f"[OK] {store} | "
+                f"{product['name']} | "
+                f"{product['price']:.2f} TL"
+            )
+
+        except Exception as e:
+
+            print(
+                f"[FIRESTORE ERROR] "
+                f"{store}: {e}"
+            )
+
+        time.sleep(
+            0.05
+        )
+
+    save_market_status(
+        store,
+        "success",
+        saved,
+        ""
+    )
+
+    return saved
 
 
 # =========================================================
-# ÜRÜN GÜNCELLEME
+# FİYAT KARŞILAŞTIRMA
+# =========================================================
+
+def update_cheapest_prices():
+
+    print("")
+    print(
+        "En ucuz fiyatlar hesaplanıyor..."
+    )
+
+    products_ref = (
+        db.collection(
+            "products"
+        )
+        .stream()
+    )
+
+    count = 0
+
+    for product_doc in products_ref:
+
+        product = product_doc.to_dict()
+
+        product_id = product_doc.id
+
+        price_docs = (
+            db.collection(
+                "prices"
+            )
+            .document(
+                product_id
+            )
+            .collection(
+                "stores"
+            )
+            .stream()
+        )
+
+        prices = []
+
+        for price_doc in price_docs:
+
+            data = price_doc.to_dict()
+
+            price = parse_price(
+                data.get(
+                    "price"
+                )
+            )
+
+            store = data.get(
+                "store"
+            )
+
+            if (
+                price is not None
+                and store
+            ):
+
+                prices.append(
+                    {
+                        "store":
+                            store,
+
+                        "price":
+                            price
+                    }
+                )
+
+        if not prices:
+            continue
+
+        prices.sort(
+            key=lambda x:
+                x["price"]
+        )
+
+        cheapest = prices[0]
+
+        product_doc.reference.set(
+            {
+
+                "cheapestStore":
+                    cheapest["store"],
+
+                "cheapestPrice":
+                    cheapest["price"],
+
+                "storeCount":
+                    len(prices),
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP
+
+            },
+            merge=True
+        )
+
+        count += 1
+
+    print(
+        f"{count} ürün için en ucuz fiyat güncellendi."
+    )
+
+
+# =========================================================
+# TEMİZLİK
+# =========================================================
+
+def cleanup_old_prices():
+
+    # Eski fiyatları otomatik silmiyoruz.
+    #
+    # Bunun nedeni:
+    # Bir market geçici olarak erişilemezse
+    # eski gerçek fiyatın kaybolmaması.
+    #
+    # Böylece sistem:
+    #
+    # güncel veri
+    # +
+    # son bilinen fiyat
+    #
+    # mantığında çalışabilir.
+
+
+# =========================================================
+# ANA MOTOR
 # =========================================================
 
 def update_products():
 
-    print("")
-    print("======================================")
-    print("UCUZA FİYAT MOTORU")
-    print("======================================")
-    print("")
+    started = datetime.now(
+        timezone.utc
+    )
 
-    for product in PRODUCTS:
+    print("")
+    print(
+        "######################################"
+    )
+    print(
+        "# UCUZA OTOMATİK FİYAT MOTORU"
+    )
+    print(
+        "######################################"
+    )
 
-        print("")
-        print(
-            "Ürün:",
-            product["name"],
-            "|",
-            product["brand"],
-            "|",
-            product["quantity"]
+    print(
+        f"Başlangıç: {started.isoformat()}"
+    )
+
+    total_saved = 0
+
+    for store, config in MARKETS.items():
+
+        try:
+
+            saved = scan_market(
+                store,
+                config["url"]
+            )
+
+            total_saved += saved
+
+        except Exception as e:
+
+            print(
+                f"[MARKET ERROR] "
+                f"{store}: {e}"
+            )
+
+            save_market_status(
+                store,
+                "error",
+                0,
+                str(e)
+            )
+
+        time.sleep(
+            REQUEST_DELAY
         )
 
+    # ----------------------------------------------
+    # En ucuz fiyatları hesapla
+    # ----------------------------------------------
+
+    try:
+
+        update_cheapest_prices()
+
+    except Exception as e:
+
         print(
-            "Barkod:",
-            product["barcode"]
+            "[COMPARE ERROR]",
+            e
         )
 
-        print("--------------------------------------")
+    # ----------------------------------------------
+    # Bitti
+    # ----------------------------------------------
 
-        scan_sok(product)
-
-        scan_a101(product)
+    finished = datetime.now(
+        timezone.utc
+    )
 
     print("")
-    print("Fiyat kontrolü tamamlandı.")
-    print("")
+    print(
+        "######################################"
+    )
+
+    print(
+        "UCUZA FİYAT MOTORU TAMAMLANDI"
+    )
+
+    print(
+        f"Toplam kaydedilen ürün: "
+        f"{total_saved}"
+    )
+
+    print(
+        f"Bitiş: {finished.isoformat()}"
+    )
+
+    print(
+        "######################################"
+    )
 
 
 # =========================================================
@@ -362,4 +1529,5 @@ def update_products():
 # =========================================================
 
 if __name__ == "__main__":
+
     update_products()
